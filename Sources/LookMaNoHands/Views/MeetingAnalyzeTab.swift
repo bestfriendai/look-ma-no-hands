@@ -26,8 +26,26 @@ struct MeetingAnalyzeTab: View {
     @State private var statusMessage = ""
     @State private var showPromptChangedAlert = false
     @State private var pendingTypeChange: MeetingType?
+    @State private var selectedModel: String = ""
+    @State private var availableModels: [String] = []
+    @State private var modelLoadTask: Task<Void, Never>?
 
     private let analyzer = MeetingAnalyzer()
+    private let modelListProvider: () async throws -> [String]
+
+    init(
+        store: MeetingStore,
+        selectedMeeting: Binding<MeetingRecord?>,
+        modelListProvider: @escaping () async throws -> [String] = { try await OllamaService().listModels() },
+        initialSelectedModel: String = "",
+        initialAvailableModels: [String] = []
+    ) {
+        self.store = store
+        self._selectedMeeting = selectedMeeting
+        self.modelListProvider = modelListProvider
+        _selectedModel = State(initialValue: initialSelectedModel)
+        _availableModels = State(initialValue: initialAvailableModels)
+    }
 
     // MARK: - Body
 
@@ -180,6 +198,26 @@ struct MeetingAnalyzeTab: View {
                 } else {
                     applyTypeChange(newType)
                 }
+            }
+
+            Text("Model:")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 8)
+
+            if availableModels.isEmpty {
+                TextField("", text: $selectedModel)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 180)
+            } else {
+                Picker("", selection: $selectedModel) {
+                    ForEach(availableModels, id: \.self) { model in
+                        Text(model).tag(model)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(width: 180)
             }
 
             Spacer()
@@ -398,7 +436,8 @@ struct MeetingAnalyzeTab: View {
 
     // MARK: - Analysis
 
-    private func loadMeeting() {
+    @MainActor
+    func loadMeeting() {
         guard let meeting = selectedMeeting else { return }
         selectedType = meeting.meetingType
         customPrompt = Settings.shared.meetingTypePrompts[meeting.meetingType.rawValue] ?? meeting.meetingType.defaultPrompt
@@ -409,6 +448,23 @@ struct MeetingAnalyzeTab: View {
         showPrompt = false
         streamedNotes = ""
         statusMessage = ""
+
+        modelLoadTask?.cancel()
+        modelLoadTask = Task {
+            await loadModels()
+        }
+    }
+
+    @MainActor
+    func loadModels() async {
+        // Load available Ollama models for the picker
+        selectedModel = Settings.shared.ollamaModel
+        availableModels = []
+        if let models = try? await modelListProvider(), !models.isEmpty {
+            let resolved = Self.resolveModelSelection(models: models, defaultModel: selectedModel)
+            availableModels = resolved.available
+            selectedModel = resolved.selected
+        }
     }
 
     private func runAnalysis() {
@@ -425,6 +481,7 @@ struct MeetingAnalyzeTab: View {
 
         let promptToUse = customPrompt
         let transcriptToUse = transcript
+        let modelToUse = selectedModel.isEmpty ? nil : selectedModel
 
         analysisTask = Task {
             let estimatedLength = max(500, min(5000, Int(Double(transcriptToUse.count) * 0.20)))
@@ -432,7 +489,8 @@ struct MeetingAnalyzeTab: View {
             do {
                 let result = try await analyzer.analyzeMeetingStreaming(
                     transcript: transcriptToUse,
-                    customPrompt: promptToUse
+                    customPrompt: promptToUse,
+                    model: modelToUse
                 ) { receivedChars, chunk in
                     guard !Task.isCancelled else { return }
                     await MainActor.run {
@@ -497,4 +555,22 @@ struct MeetingAnalyzeTab: View {
             try? notes.write(to: url, atomically: true, encoding: .utf8)
         }
     }
+
+#if DEBUG
+    static func resolveModelSelection(models: [String], defaultModel: String) -> (selected: String, available: [String]) {
+        let selected: String
+        if models.contains(defaultModel) {
+            selected = defaultModel
+        } else {
+            selected = models.first ?? defaultModel
+        }
+        return (selected, models)
+    }
+#endif
+
+#if DEBUG
+    var modelSelectionSnapshot: (selected: String, available: [String]) {
+        (selectedModel, availableModels)
+    }
+#endif
 }
