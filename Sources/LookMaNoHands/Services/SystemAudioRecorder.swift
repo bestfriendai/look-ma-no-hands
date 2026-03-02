@@ -30,8 +30,18 @@ class SystemAudioRecorder: NSObject {
     /// Whether we're currently recording
     private(set) var isRecording = false
 
+    /// Chunk duration in seconds for streaming transcription (default 5s)
+    let chunkDuration: TimeInterval
+
     /// Callback for audio data chunks
     var onAudioChunk: (([Float]) -> Void)?
+
+    // MARK: - Initialization
+
+    init(chunkDuration: TimeInterval = 5) {
+        self.chunkDuration = chunkDuration
+        super.init()
+    }
 
     deinit {
         if isRecording {
@@ -186,15 +196,13 @@ extension SystemAudioRecorder: SCStreamOutput {
             audioBuffer.append(contentsOf: audioSamples)
 
             // Optionally call chunk callback for streaming transcription
-            if let onAudioChunk = onAudioChunk, audioBuffer.count >= Int(targetSampleRate * 5) {
-                // Send 5-second chunks for faster, more responsive transcription
-                let chunk = Array(audioBuffer.prefix(Int(targetSampleRate * 5)))
+            let chunkSamples = Int(targetSampleRate * chunkDuration)
+            if let onAudioChunk = onAudioChunk, audioBuffer.count >= chunkSamples {
+                let chunk = Array(audioBuffer.prefix(chunkSamples))
                 onAudioChunk(chunk)
 
-                // Keep overlap for next chunk (1 second)
-                let overlapSamples = Int(targetSampleRate * 1)
-                let samplesToRemove = Int(targetSampleRate * 5) - overlapSamples
-                audioBuffer.removeFirst(samplesToRemove)
+                // Remove all processed samples (no overlap — prevents duplicate transcription)
+                audioBuffer.removeFirst(min(chunkSamples, audioBuffer.count))
             }
         }
     }
